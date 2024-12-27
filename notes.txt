@@ -1,0 +1,19 @@
+fcn8:
+- pool3_pred + upsample2x(pool_4_pred) + upsample4x(last_pred) -> upsampled -> model_pred
+
+fcn16:
+- pool4_pred + upsampled(last_pred) -> upsampled -> model_pred
+
+fcn32
+- last_pred -> upsampled -> model_pred
+
+
+upsamples {
+    2x -> 5
+    2x -> 4 + 5
+    8x -> 3 + 4 + 5
+    16x -> 4 + 5
+    32x -> 5
+
+
+}
