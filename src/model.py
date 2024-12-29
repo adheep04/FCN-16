@@ -167,7 +167,8 @@ class FCN(nn.Module):
         # bilinear upsample and return
         if self.net=='8': return self.upsample_final(fuse2, out_dim=img_spatial_dims)
         
-        
+    
+    
     def _crop(self, big, small):
         '''
         crops big to be the same dimension as small given
@@ -194,8 +195,8 @@ class FixedInterpolation(nn.Module):
 
 class SkipConnection(nn.Module):
     '''
-    applies a convolution, upsamples 2x, and stores the resulting output,
-    but passes its input forward untouched to the next layer
+    applies a convolution, scales, and stores the resulting output,
+    but passes the input forward untouched to the next layer
 
     '''
     def __init__(self, in_channels, n_class):
