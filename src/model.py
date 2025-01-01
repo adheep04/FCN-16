@@ -1,3 +1,9 @@
+'''
+This is a fully convolutional neural network implementation using pytorch with a few minor architectural 
+modifications from the original paper
+
+
+'''
 from torch import nn
 import torch
 from torchvision.models import vgg16, VGG16_Weights
@@ -44,10 +50,15 @@ class FCN(nn.Module):
         
         adds 1x1 conv layer after pool4 for future image reconstruction
         
-        (my reimplementation of surgery.transplant() :P)
+        initializes bilinear interpolation weights for learned upsample layers
+        
+        **adds (8, 8) padding to the first convolution (instead of the paper's (100, 100))
+        **adds (3, 3) padding to fc6 convolution layer
+        
+        (my reimplementation of surgery.transplant())
         '''
         
-        # load pretrained vgg16 model to do "surgery"
+        ''' load pretrained vgg16 model to do "surgery '''
         # original fcn paper used AlexNet and GoogleNet as well but found the best results using VGG16
         self.base_net.load_state_dict(vgg16(weights=VGG16_Weights.DEFAULT).state_dict())
 
@@ -90,22 +101,24 @@ class FCN(nn.Module):
         self.base_net.features.insert(25, SkipConnection(in_channels=512, n_class=n_class)) # pool4 score is shape (b, c, h//16, w//16)
         
         # initialize deconvolution weights like that of bilinear interpolation and have it learnable
-        # https://github.com/tnarihi/caffe/commit/4f249a00a29432e0bb6723087ec64187e1506f0f <- used this code to produce the follow initialization
+        # https://github.com/tnarihi/caffe/commit/4f249a00a29432e0bb6723087ec64187e1506f0f <- used this code to produce the following initialization
         bilinear_interp_weights = torch.tensor(
             [[[[0.0625, 0.1875, 0.1875, 0.0625],
             [0.1875, 0.5625, 0.5625, 0.1875],
             [0.1875, 0.5625, 0.5625, 0.1875],
             [0.0625, 0.1875, 0.1875, 0.0625]]]]
-        # duplicate along in_channel and out_channel dimension for size (30, 30, 4, 4)
-        ).repeat((30, 30, 1, 1))
+        # duplicate along in_channel and out_channel dimension for size (1, 1, 4, 4) -> (n_class, n_class, 4, 4)
+        ).repeat((n_class, n_class, 1, 1))
         
         self.upsample_a.weight.data = bilinear_interp_weights
         self.upsample_b.weight.data = bilinear_interp_weights
         
+        
+        ''' **note: this detail isn't part of the original implementation'''
         # replace fc6 padding from (1, 1) -> (3, 3)
-        ''' note: this detail isn't part of the original implementation'''
         self.base_net.features[0].padding = (8, 8)
         self.base_net.classifier[0].padding = (3, 3)
+        
 
     def forward(self, x):
         '''
@@ -131,7 +144,9 @@ class FCN(nn.Module):
         score_fr = self.base_net.classifier(score_fr)
         
         # if net is fcn32, upsample back to original spatial dimensions and return
-        if self.net=='32': return self.upsample_final(score_fr, out_dim=img_spatial_dims)
+        if self.net=='32': 
+            return self.upsample_final(score_fr, out_dim=img_spatial_dims)
+        
         
         
         '''fcn 16'''
@@ -142,31 +157,35 @@ class FCN(nn.Module):
         score_p4 = self.base_net.features[25].val
         
         # crop upsampled score to align with skip connection dimensions
-        score_fr_cropped = self._crop(big=score_fr_upsampled, small=score_p4)
+        score_fr_cropped = self._crop(score_fr_upsampled, score_p4)
 
         # fuse both (sum them)
         fuse1 = score_fr_cropped + score_p4
         
         # bilinear upsample back to image spatial dim and return
-        if self.net=='16': return self.upsample_final(fuse1, out_dim=img_spatial_dims)
+        if self.net=='16':
+            return self.upsample_final(fuse1, out_dim=img_spatial_dims)
         
         
         '''fcn 8'''
         # upsample by 2
         fuse1_upsampled = self.upsample_b(fuse1)
         
-        # get pool3 pred for net 8
+        # get pool3 skip score for net 8
         score_p3 = self.base_net.features[17].val
         
         # crop upsampled score to align with skip connection dimensions
-        fuse1_cropped = self._crop(big=fuse1_upsampled, small=score_p3)
+        fuse1_cropped = self._crop(fuse1_upsampled, score_p3)
         
-        # fuse pool3 pred and upsampled fuse1
+        # fuse pool3 pred and upsampled fuse 1
         fuse2 = fuse1_cropped + score_p3
         
         # bilinear upsample and return
-        if self.net=='8': return self.upsample_final(fuse2, out_dim=img_spatial_dims)
+        if self.net=='8': 
+            return self.upsample_final(fuse2, out_dim=img_spatial_dims)
         
+        
+        raise Exception('you shouldn"t be here')
     
     
     def _crop(self, big, small):
@@ -175,10 +194,13 @@ class FCN(nn.Module):
         that they are two tensors and the last two dimensions of small
         is smaller than that of big
         
+        big is the larger spatially dimensional tensor
+        
         '''
         
         # get dimensions
         h_small, w_small = small.shape[2:]
+    
     
         return center_crop(img=big, output_size=(h_small, w_small))
     
@@ -204,7 +226,7 @@ class SkipConnection(nn.Module):
         # upsample layer
         self.val = None
         # pool4 has 512 output channels
-        # 30 output channels for each class
+        # n_class output channels for each class
         self.conv = nn.Conv2d(in_channels=in_channels, out_channels=n_class, kernel_size=1, stride=1)
         # initialize weights with 0small constant (not 0)
         nn.init.constant_(self.conv.weight, val=0.001)
@@ -225,6 +247,12 @@ class SkipConnection(nn.Module):
         return x
     
 class VGG16(nn.Module):
+    '''
+    structure of the original VGG-16 network used for classifying 1000 common objects from the imagenet dataset
+    
+    changed in-place=True to False for all layers for pytorch computation graph
+    
+    '''
     def __init__(self):
         super().__init__()
         
@@ -232,43 +260,43 @@ class VGG16(nn.Module):
             
             # conv 1
             nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=(1, 1)),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv2d(64, 64, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
             
             # conv 2
             nn.Conv2d(64, 128, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(128, 128, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.MaxPool2d(2, 2),
             
             # conv 3
             nn.Conv2d(128, 256, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(256, 256, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(256, 256, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.MaxPool2d(2, 2),
             
             # conv 4
             nn.Conv2d(256, 512, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(512, 512, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(512, 512, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.MaxPool2d(2, 2),
             
             # conv5
             nn.Conv2d(512, 512, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(512, 512, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(512, 512, 3, 1, (1, 1)),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.MaxPool2d(2, 2),
         )
         
@@ -278,11 +306,11 @@ class VGG16(nn.Module):
             
             # these layers will be replaced by convolutions
             nn.Linear(in_features=25088, out_features=4096, bias=True),
-            nn.ReLU(True),
-            nn.Dropout(p=0.5, inplace=True),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
             nn.Linear(in_features=4096, out_features=4096, bias=True),
-            nn.ReLU(True),
-            nn.Dropout(p=0.5, inplace=True),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
             nn.Linear(in_features=4096, out_features=1000, bias=True),
         )
         
