@@ -210,9 +210,10 @@ class FixedInterpolation(nn.Module):
     final upsample to the input dimensions in a FCN
     
     '''
+    
     def forward(self, x, out_dim):
         # bilinear fixed interpolation to "increase the resolution"
-        return nn.functional.interpolate(input=x, size=out_dim, mode='bilinear') 
+        return nn.functional.upsample_bilinear(input=x, size=out_dim)
           
 
 class SkipConnection(nn.Module):

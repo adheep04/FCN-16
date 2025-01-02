@@ -71,7 +71,6 @@ class CityscapesDataset(Dataset):
         label_tensor = torch.from_numpy(np.array(label_img)).unsqueeze(0)
     
         
-        
         assert len(label_tensor.shape) == 3
         
         return label_tensor
@@ -84,7 +83,6 @@ class CityscapesDataset(Dataset):
         # replace id with train class given map
         for id, train_id in map.items():
             label_tensor[label_tensor == id] = train_id
-        
         
         
     def _resize(self, img, max_pixels=config.MAX_PIXELS):

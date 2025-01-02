@@ -3,6 +3,9 @@ from pathlib import Path
 
 class Config:
     
+    # training/validation run num/type
+    RUN = '3__lr_up_wd_d'
+    
     # Paths
     DATA_TRAIN_DIR = Path("data/cityscapes/train/img") 
     LABEL_TRAIN_DIR = Path("data/cityscapes/train/label")
@@ -10,16 +13,19 @@ class Config:
     DATA_VAL_DIR = Path("data/cityscapes/val/img")
     LABEL_VAL_DIR = Path("data/cityscapes/val/label")
     
-    MODEL_SAVE_PATH = Path("models/checkpoints")
+    CHECKPOINT_DIR = Path("checkpoints/")
+    
+    LOG_DIR = Path("logs")
 
     # Model hyperparameters
     BATCH_SIZE = 1
-    LEARNING_RATE = 2e-4
-    NUM_EPOCHS = 1
+    LEARNING_RATE = 8e-4
+    NUM_EPOCHS = 10
     
-    # image crop
+    # image crop to save memory during training
     MAX_PIXELS = 1024*1024
     
+    # 'class', true_id, color
     LABELS = {  
         ('road'         , 0 , (128, 64,128)),
         ('sidewalk'     , 1 , (244, 35,232) ),
@@ -43,6 +49,8 @@ class Config:
         ('null'         , 19 ,  None),
     }
     
+    # maps true_id -> train_id
+    # 19 is ignore class
     LABEL_MAP = {
     0 : 19,
     1 : 19,
@@ -82,7 +90,7 @@ class Config:
     
 }
 
-    
+    # 19 classes + 1 ignore class
     CLASS_SIZE = len(LABELS)
 
 config = Config()
