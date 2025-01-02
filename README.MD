@@ -11,6 +11,6 @@
 ![alt text](<Screenshot 2025-01-01 234052.png>)
 
 
-### class label distribution :(
+### class label distribution in dataset :(
 
 ![alt text](<Screenshot 2025-01-02 022500.png>)
