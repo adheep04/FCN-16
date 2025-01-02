@@ -47,7 +47,6 @@ class CityscapesDataset(Dataset):
         data_img = Image.open(img_path)
         label_img = Image.open(label_path)
         
-        
         # apply respective adjustments then resize image to save memory 
         data_tensor = self._resize(self.process_img(data_img))   
         label_tensor = self._resize(self.process_label(label_img))

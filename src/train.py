@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim import SGD
 from torch.amp import autocast, GradScaler
+import torch.optim.lr_scheduler as schedule
 
 import numpy as np
 from math import inf
@@ -12,7 +13,7 @@ import time
 
 from pathlib import Path
 
-from misc.model_older import FCN
+from model import FCN
 from dataset import CityscapesDataset
 from config import config
 
@@ -54,8 +55,8 @@ def train(resume=False, resume_file_path=None):
         shuffle = False
     )
     
-    # labels with value 19 are ignored
-    loss_fn = nn.CrossEntropyLoss(ignore_index=19)
+    # initialize focal loss with ignore class 19
+    loss_fn = FocalLoss(ignore_index=19)
     
     # scales the loss/gradients after switching to float16 to avoid underflow/overflow
     scaler = GradScaler('cuda' if torch.cuda.is_available() else 'cpu')
@@ -81,18 +82,27 @@ def train(resume=False, resume_file_path=None):
     assert len(bias) > 0
         
     # initialize optimizer with momentum (add accumulated past gradients to smoothen updates)
-    # set weight decay = 0.0005 (l2 regularization to prevent overfitting / large weight values)
     optimizer = SGD(params=[
+        # lr = 8e-4
         {'params' : bias, 'lr' : 2 * config.LEARNING_RATE}, # 2 x lr
         {'params' : weight, 'lr' : config.LEARNING_RATE}
-        ], momentum=0.9, weight_decay=5e-6)
-
+        #  momentum = 0.9, wd = 5e-6
+        ], momentum=config.MOMENTUM, weight_decay=config.WEIGHT_DECAY)
     
+    scheduler = schedule.CyclicLR(
+        optimizer,
+        base_lr=4e-5,
+        max_lr=3e-3,
+        step_size_up=300,  # Steps per half cycle
+        mode='triangular2'  # Decreasing amplitude over time
+    )
+        
     ''' training loop '''
     
     fcn8.train()
 
-    try:
+
+    try: 
         for epoch in range(config.NUM_EPOCHS):
             
             # run validation for last epoch
@@ -110,9 +120,7 @@ def train(resume=False, resume_file_path=None):
 
             print(f'starting epoch {epoch}')
             for step, (data, label) in enumerate(train_dataloader):
-       
-                # initialize gradients (so they don't accumulate)
-                optimizer.zero_grad(set_to_none=True)
+    
                 
                 # send data to device
                 data = data.to(device)
@@ -122,49 +130,56 @@ def train(resume=False, resume_file_path=None):
                 with autocast('cuda' if torch.cuda.is_available() else 'cpu', enabled=True):
                     # forward pass  
                     output = fcn8(data)
-                    loss = loss_fn(output, label)
+                    loss = loss_fn(output, label) / config.ACCUM_STEPS
                 
                 # log loss
                 if step % log_step == 0:
                     
                     # miou is the mean of the class ious
                     miou = np.mean(class_iou(output, label)[0])
-                    print(f'{loss}, {miou}')
+                    acc = pixel_acc(output, label)
+                    print(f'{loss}, {miou}, {acc}')
                     
                     # log loss and miou 
                     writer.add_scalar('Loss/train', loss.item(), global_step)
                     writer.add_scalar('mIoU/train', miou, global_step)
-                    
-                    # log learning rates
-                    writer.add_scalar('LR/bias', optimizer.param_groups[0]['lr'], global_step)
-                    writer.add_scalar('LR/weight', optimizer.param_groups[1]['lr'], global_step)
+                    writer.add_scalar('accuracy/train', acc, global_step)
                     
                     # log sample predictions
                     if step % (log_step * 10) == 0:
                         pred = output.softmax(dim=1).argmax(dim=1)
-                        writer.add_images('Predictions', pred.unsqueeze(1).float(), global_step)
-                        writer.add_images('Ground Truth', label.unsqueeze(1).float(), global_step)
+                        writer.add_images('Predictions', pred.unsqueeze(1).float() // 19, global_step)
+                        writer.add_images('Ground Truth', label.unsqueeze(1).float() // 19, global_step)
                 
                 # backward pass (calculate gradients)
                 # scales loss if needed to prevent underflow
                 scaler.scale(loss).backward()
                 
-                # update parameters
-                # unscales gradients back to original scale
-                scaler.step(optimizer)
                 
-                # adjusts scale factor
-                scaler.update()
+                if (step + 1) % config.ACCUM_STEPS == 0:
+                    # update parameters
+                    # unscales gradients back to original scale
+                    scaler.step(optimizer)
+                    
+                    scheduler.step()
+                    
+                    # adjusts scale factor
+                    scaler.update()
+                    
+                    # reset gradients to 0 (so they don't accumulate past step size)
+                    optimizer.zero_grad(set_to_none=True)
                 
                 # update for tb
                 global_step += 1
-                
-    except Exception as e:
-        print(f"Error during training: {e}")
-        writer.close() 
-        torch.save(fcn8.state_dict(),
-            f=config.CHECKPOINT_DIR / f'paused_s_dict_{config.RUN}_{int(time.time())}')
-         
+                    
+    except KeyboardInterrupt:
+        print("training interrupted. Saving checkpoint...")
+        writer.close()
+        torch.save(fcn8.state_dict(), 
+            f=config.CHECKPOINT_DIR / f'interrupted_s_dict_{config.RUN}_{int(time.time())}')
+        print(f'epoch: {epoch}, step: {step}')
+        return
+        
     writer.close() 
     torch.save(fcn8.state_dict(),
         f=config.CHECKPOINT_DIR / f'finished_s_dict_{config.RUN}_{int(time.time())}')
@@ -188,6 +203,7 @@ def validation(
     ious = np.zeros(19)
     loss = 0
     iou = 0
+    acc = 0
     
     # move model to device and set to evalulation mode
     model = model.to(device)
@@ -205,20 +221,24 @@ def validation(
             output = model(data)
             step_loss = loss_fn(output, label)
             
-            # get iou for each class and overall mean
+            # get metrics
             step_ious, class_ids = class_iou(output, label)
             step_iou = np.mean(step_ious)
+            step_acc = pixel_acc(output, label)
                 
             # update running average metrics
             loss += (step_loss - loss) / (step + 1) if step != 0 else step_loss
             iou += (step_iou - iou) / (step + 1) if step != 0 else step_iou
+            acc += (step_acc - acc) / (step + 1) if step != 0 else acc
             ious[class_ids] += (step_ious - ious[class_ids]) / (step + 1) if step != 0 else step_ious
+            
         
                 
         stats = {
             'mean_loss' : loss,
             'mean_iou' : iou,
             'miou_per_class' : ious,
+            'acc' : acc
         }
         
         torch.save(stats, f=config.CHECKPOINT_DIR / f'val_{config.RUN}_{epoch}')
@@ -233,6 +253,7 @@ def class_iou(model_out, label):
         
         args:
         - model_out: tensor shape (1, n_class, h, w)
+        - label: tensor shape (1, 1, h, w)
         
         output:
         - (np.array(n_class), mean_iou float)
@@ -279,3 +300,33 @@ def class_iou(model_out, label):
                 scores.append(0)
         
         return scores, np.array(list(class_ids), dtype=int)
+
+def pixel_acc(model_out, label):
+    # convert from predictions for all classes to single prediction per pixel
+    # (1, n_class, h, w) -> (1, h, w)
+    pred = model_out.softmax(dim=1).argmax(dim=1).to(dtype=torch.uint8)
+            
+    # ensure tensors have the same shape
+    assert pred.shape == label.shape, "Predictions and labels must have the same shape"
+    
+    accuracy = (pred.cpu().numpy() == label.cpu().numpy()).mean()
+    
+    return accuracy.item()
+
+class FocalLoss(nn.Module):
+   def __init__(self, alpha=config.ALPHA, gamma=config.GAMMA, ignore_index=19):
+       super().__init__()
+       self.alpha = alpha
+       self.gamma = gamma
+       self.ignore_index = ignore_index
+
+   def forward(self, inputs, targets):
+       ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
+       pt = torch.exp(-ce_loss)
+       focal_loss = self.alpha * (1-pt)**self.gamma * ce_loss
+       
+       return focal_loss.mean()
+
+
+if __name__ == '__main__':
+    train()
