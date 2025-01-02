@@ -1,4 +1,4 @@
-# training so far....
+# FCN-8 implementation training and results:
 
 
 ### ground-truth/prediction:
