@@ -2,7 +2,7 @@
 
 after results from this, i have decided to replace the backbone with a modern swin-v2-t classifier. :D
 
-### accuracy (achieved around 80-85% pixel accuracy)
+### accuracy (achieved around 86-92% pixel accuracy)
 
 ![alt text](image-1.png)
 
